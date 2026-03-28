@@ -189,8 +189,8 @@ class SearchResult(Generic[ConfigT]):
 ### Selection Utilities
 
 - `compute_pareto_front(candidates, objectives)` — non-dominated subset
-- `select_best_candidate(pareto, objectives)` — lexicographic pick
-- `select_minimax_rank(candidates, objectives)` — balanced pick (smallest worst-rank)
+- `select_best_candidate(pareto, objectives)` — lexicographic pick (optional; not used for `SearchResult.best`)
+- `select_minimax_rank(candidates, objectives)` — **default “best”** for multi-objective runs: per-objective dense ranks, minimise the **worst** rank (minimax), tie-break by **smallest sum of ranks**
 
 ## Project Structure
 

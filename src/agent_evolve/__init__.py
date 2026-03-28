@@ -7,6 +7,7 @@ from agent_evolve.results import (
     compute_pareto_front,
     select_best_candidate,
     select_minimax_rank,
+    sort_by_minimax_rank,
 )
 from agent_evolve.optimizer import AgentEvolver
 from agent_evolve.loop import run_evolution_loop
@@ -21,4 +22,5 @@ __all__ = [
     "run_evolution_loop",
     "select_best_candidate",
     "select_minimax_rank",
+    "sort_by_minimax_rank",
 ]

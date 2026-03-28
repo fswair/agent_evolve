@@ -33,10 +33,20 @@ class Problem(Protocol[ConfigT]):
     Optional (detected via ``hasattr`` at runtime)
     ------------------------------------------------
     validate(config) -> bool
-        Fast feasibility pre-check.  Raise ``ValueError`` for rich feedback.
+        Fast feasibility pre-check.  **Raise** ``ValueError("...")`` with a specific
+        explanation when invalid (never return False silently — the optimizer forwards
+        that text to the LLM).
     search_space_description() -> str
         Human-readable description of the configuration format, valid ranges,
         and constraints.  Included verbatim in LLM prompts.
+
+    Optional attribute (not part of the protocol check):
+
+    candidate_model
+        ``type[pydantic.BaseModel]`` — if set on the problem instance or class,
+        :class:`AgentEvolver` exposes it as ``problem_def.CandidateConfig`` for
+        Kedi ``list[CandidateConfig]`` LLM outputs.  Fields must match the dict
+        shape expected by ``validate`` / ``evaluate``.
     """
 
     @property

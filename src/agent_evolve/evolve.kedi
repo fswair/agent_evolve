@@ -4,11 +4,12 @@
 # Main block: calls into Python (agent_evolve.loop) passing procedures.
 #
 # Contract: a module named `problem_def` must be importable and expose:
-#   problem  — object satisfying the agent_evolve Problem protocol
-#   config   — dict with search hyper-parameters
+#   problem         — object satisfying the agent_evolve Problem protocol
+#   config          — dict with search hyper-parameters
+#   CandidateConfig — Pydantic model for one candidate (from problem.candidate_model)
 
 ```
-from problem_def import problem, config
+from problem_def import problem, config, CandidateConfig
 
 from agent_evolve._support import format_search_space_description
 from agent_evolve.loop import run_evolution_loop
@@ -50,20 +51,21 @@ result = None
 # LLM procedures
 # ============================================================================
 
-@generate_initial_candidates(search_space_desc: str, n_candidates: int) -> list:
+@generate_initial_candidates(search_space_desc: str, n_candidates: int) -> `list[CandidateConfig]`:
     You are an optimization expert generating candidates for a multi-objective optimization problem.\n\n\
     <search_space_desc>\n\n\
     Generate exactly <n_candidates> different configuration candidates that:\n\
     1. Are diverse and explore different regions of the search space\n\
     2. Are likely to be valid (satisfy any constraints)\n\
     3. Trade off between different objectives\n\n\
+    Each candidate must strictly match the Pydantic schema CandidateConfig (field names, types, required fields).\n\n\
     [thought_process]: Your strategy for generating diverse, valid initial candidates.\n\
-    [candidates: list[dict]]: A JSON list of exactly <n_candidates> configuration dictionaries.
+    [candidates: `list[CandidateConfig]`]: Exactly <n_candidates> full configuration objects — no empty placeholders.
 
     = `candidates`
 
 
-@regenerate_candidates(failed_str: str, n_candidates: int, search_space_desc: str, constraint_instruction: str, performance_insights: str) -> list:
+@regenerate_candidates(failed_str: str, n_candidates: int, search_space_desc: str, constraint_instruction: str, performance_insights: str) -> `list[CandidateConfig]`:
     You are an optimization expert. Previous candidates failed validation. Learn from the failures and generate better candidates.\n\n\
     <search_space_desc>\n\n\
     FAILED CANDIDATES AND THEIR ISSUES:\n\
@@ -76,13 +78,14 @@ result = None
     1. Address the issues from the failed candidates\n\
     2. Follow the constraint instructions\n\
     3. Are likely to be valid\n\n\
+    Each candidate must strictly match CandidateConfig.\n\n\
     [thought_process]: How you are addressing the failures in these new candidates.\n\
-    [candidates: list[dict]]: A JSON list of exactly <n_candidates> configuration dictionaries.
+    [candidates: `list[CandidateConfig]`]: Exactly <n_candidates> full configuration objects.
 
     = `candidates`
 
 
-@generate_offspring(pareto_str: str, n_candidates: int, search_space_desc: str, constraint_instruction: str, performance_insights: str) -> list:
+@generate_offspring(pareto_str: str, n_candidates: int, search_space_desc: str, constraint_instruction: str, performance_insights: str) -> `list[CandidateConfig]`:
     You are an optimization expert. Generate offspring candidates based on high-quality Pareto-optimal configurations.\n\n\
     <search_space_desc>\n\n\
     PARETO-OPTIMAL CONFIGURATIONS (best performers so far):\n\
@@ -96,13 +99,14 @@ result = None
     2. Explore new trade-offs between objectives\n\
     3. Follow the constraint instructions\n\
     4. Try to improve on existing solutions\n\n\
+    Each candidate must strictly match CandidateConfig.\n\n\
     [thought_process]: How you are creating offspring that build on and improve the Pareto configurations.\n\
-    [candidates: list[dict]]: A JSON list of exactly <n_candidates> configuration dictionaries.
+    [candidates: `list[CandidateConfig]`]: Exactly <n_candidates> full configuration objects.
 
     = `candidates`
 
 
-@regenerate_offspring(failed_str: str, pareto_str: str, n_candidates: int, search_space_desc: str, constraint_instruction: str, performance_insights: str) -> list:
+@regenerate_offspring(failed_str: str, pareto_str: str, n_candidates: int, search_space_desc: str, constraint_instruction: str, performance_insights: str) -> `list[CandidateConfig]`:
     You are an optimization expert. Some offspring candidates failed. Learn from the failures while using the Pareto front as guidance.\n\n\
     <search_space_desc>\n\n\
     PARETO-OPTIMAL CONFIGURATIONS (reference for valid, high-quality solutions):\n\
@@ -118,8 +122,9 @@ result = None
     2. Stay close to the Pareto configurations (which are known to be valid)\n\
     3. Follow the constraint instructions\n\
     4. Try to improve on existing solutions\n\n\
+    Each candidate must strictly match CandidateConfig.\n\n\
     [thought_process]: How you are fixing the failures while building on Pareto patterns.\n\
-    [candidates: list[dict]]: A JSON list of exactly <n_candidates> configuration dictionaries.
+    [candidates: `list[CandidateConfig]`]: Exactly <n_candidates> full configuration objects.
 
     = `candidates`
 

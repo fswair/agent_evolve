@@ -39,17 +39,40 @@ class _SimpleProblem:
 class TestEvaluateBatch:
     def test_valid_candidates(self):
         p = _SimpleProblem()
-        valid, failed = evaluate_batch(p, [{"x": 1}, {"x": 2}], OBJS, verbose=False)
+        valid, failed, ordered = evaluate_batch(
+            p, [{"x": 1}, {"x": 2}], OBJS, verbose=False
+        )
         assert len(valid) == 2
         assert len(failed) == 0
+        assert len(ordered) == 2
         assert valid[0].objectives["value"] == 1.0
+        assert ordered[0] is valid[0] and ordered[1] is valid[1]
 
     def test_invalid_via_validate(self):
         p = _SimpleProblem()
-        valid, failed = evaluate_batch(p, [{"x": -1}], OBJS, verbose=False)
+        valid, failed, ordered = evaluate_batch(p, [{"x": -1}], OBJS, verbose=False)
+        assert len(ordered) == 1
         assert len(valid) == 0
         assert len(failed) == 1
-        assert "non-negative" in failed[0].error_message
+        assert "non-negative" in (failed[0].error_message or "")
+        assert "ValueError" in (failed[0].error_message or "")
+
+    def test_validate_returns_false_gives_actionable_hint(self):
+        class FalseValidate:
+            objectives = OBJS
+
+            def validate(self, config):
+                return False
+
+            def evaluate(self, config):
+                return {"value": 1.0, "weight": 1.0}
+
+        valid, failed, _ = evaluate_batch(FalseValidate(), [{"x": 1}], OBJS, verbose=False)
+        assert len(valid) == 0
+        assert len(failed) == 1
+        em = failed[0].error_message or ""
+        assert "returned False" in em
+        assert "ValueError" in em
 
     def test_exception_in_evaluate(self):
         class BadProblem:
@@ -57,10 +80,11 @@ class TestEvaluateBatch:
             def evaluate(self, config):
                 raise RuntimeError("boom")
 
-        valid, failed = evaluate_batch(BadProblem(), [{"x": 1}], OBJS, verbose=False)
+        valid, failed, _ = evaluate_batch(BadProblem(), [{"x": 1}], OBJS, verbose=False)
         assert len(valid) == 0
         assert len(failed) == 1
-        assert "boom" in failed[0].error_message
+        assert "boom" in (failed[0].error_message or "")
+        assert "RuntimeError" in (failed[0].error_message or "")
 
     def test_no_validate_method(self):
         class NoValidate:
@@ -68,8 +92,22 @@ class TestEvaluateBatch:
             def evaluate(self, config):
                 return {"value": 1.0, "weight": 2.0}
 
-        valid, failed = evaluate_batch(NoValidate(), [{"a": 1}], OBJS, verbose=False)
+        valid, failed, ordered = evaluate_batch(
+            NoValidate(), [{"a": 1}], OBJS, verbose=False
+        )
         assert len(valid) == 1
+        assert len(ordered) == 1
+
+    def test_ordered_matches_candidate_order(self):
+        p = _SimpleProblem()
+        valid, failed, ordered = evaluate_batch(
+            p, [{"x": 1}, {"x": -1}, {"x": 2}], OBJS, verbose=False
+        )
+        assert len(ordered) == 3
+        assert ordered[0].is_valid and ordered[1].is_valid is False
+        assert ordered[2].is_valid
+        assert ordered[0].objectives["value"] == 1.0
+        assert ordered[2].objectives["value"] == 2.0
 
 
 # ------------------------------------------------------------------
@@ -78,20 +116,41 @@ class TestEvaluateBatch:
 
 class TestParseCandidates:
     def test_dict_list(self):
-        result = parse_candidates([{"a": 1}, {"b": 2}], 2)
-        assert len(result) == 2
+        parsed, raw = parse_candidates([{"a": 1}, {"b": 2}], 2)
+        assert parsed == [{"a": 1}, {"b": 2}]
+        assert raw == [{"a": 1}, {"b": 2}]
 
     def test_json_strings(self):
-        result = parse_candidates(['{"a": 1}', '{"b": 2}'], 2)
-        assert len(result) == 2
-        assert result[0] == {"a": 1}
+        parsed, raw = parse_candidates(['{"a": 1}', '{"b": 2}'], 2)
+        assert parsed == [{"a": 1}, {"b": 2}]
+        assert raw[0] == '{"a": 1}'
 
     def test_non_list_returns_empty(self):
-        assert parse_candidates("not a list", 1) == []
+        assert parse_candidates("not a list", 1) == ([], [])
 
-    def test_bad_json_skipped(self):
-        result = parse_candidates(["not json", {"a": 1}], 2)
-        assert len(result) == 1
+    def test_bad_json_becomes_empty_dict(self):
+        parsed, raw = parse_candidates(["not json", {"a": 1}], 2)
+        assert len(parsed) == 2
+        assert parsed[0] == {}
+        assert parsed[1] == {"a": 1}
+        assert raw[0] == "not json"
+
+    def test_dict_wrapper_uses_candidates_key(self):
+        parsed, raw = parse_candidates(
+            {"candidates": [{"x": 1}], "thought": "ok"},
+            1,
+            log_fn=lambda m: None,
+        )
+        assert parsed == [{"x": 1}]
+        assert raw == [{"x": 1}]
+
+    def test_json_string_parses_to_list(self):
+        from agent_evolve._support import parse_llm_json_array
+
+        s = '[{"selection": [0, 1]}, {"selection": [2]}]'
+        assert parse_llm_json_array(s) == [{"selection": [0, 1]}, {"selection": [2]}]
+        parsed, raw = parse_candidates(s, 2, log_fn=lambda m: None)
+        assert parsed == [{"selection": [0, 1]}, {"selection": [2]}]
 
 
 # ------------------------------------------------------------------

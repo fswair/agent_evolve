@@ -139,6 +139,12 @@ class TestBasicLoop:
         assert len(result.history) == 3
         assert [h["gen"] for h in result.history] == [1, 2, 3]
 
+    def test_best_per_generation_tracks_each_gen(self):
+        result = _run(_SimpleProblem(), generations=3)
+        assert len(result.best_per_generation) == 3
+        for b in result.best_per_generation:
+            assert "score" in b.objectives
+
     def test_all_candidates_tracked(self):
         result = _run(_SimpleProblem(), pop_size=3, generations=2)
         assert len(result.all_candidates) >= 6

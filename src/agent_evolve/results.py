@@ -35,10 +35,13 @@ class SearchResult(Generic[ConfigT]):
     Attributes
     ----------
     objectives : objectives used during the run.
-    best : the single recommended candidate.
+    best : the single recommended candidate (minimax rank over the Pareto front;
+        see :func:`select_minimax_rank`).
     pareto_front : non-dominated set.
     all_candidates : every evaluated candidate across all generations.
     history : per-generation summary dicts.
+    best_per_generation : minimax-best candidate on the cumulative Pareto front
+        after each generation (same rule as ``best``); useful for progress.
     """
 
     objectives: Sequence[ObjectiveSpec]
@@ -46,6 +49,7 @@ class SearchResult(Generic[ConfigT]):
     pareto_front: List[Candidate[ConfigT]] = field(default_factory=list)
     all_candidates: List[Candidate[ConfigT]] = field(default_factory=list)
     history: List[Dict[str, Any]] = field(default_factory=list)
+    best_per_generation: List[Candidate[ConfigT]] = field(default_factory=list)
 
 
 # ------------------------------------------------------------------
@@ -134,18 +138,22 @@ def _rank_candidates(
     candidates: Sequence[Candidate[ConfigT]],
     objectives: Sequence[ObjectiveSpec],
 ) -> List[List[int]]:
-    """``ranks[i][j]`` = 1-based dense rank of candidate *i* on objective *j*."""
+    """``ranks[i][j]`` = 1-based **dense** rank of candidate *i* on objective *j* (1 = best).
+
+    Ties share the same rank; the next distinct value gets the next integer (no gaps
+    from skipped positions).
+    """
     n = len(candidates)
     ranks: List[List[int]] = [[0] * len(objectives) for _ in range(n)]
     for j, spec in enumerate(objectives):
         values = [float(c.objectives.get(spec.name, 0.0)) for c in candidates]
         reverse = spec.goal == "max"
         order = sorted(range(n), key=lambda i: values[i], reverse=reverse)
-        cur = 1
+        dense = 1
         for pos, idx in enumerate(order):
             if pos > 0 and values[order[pos]] != values[order[pos - 1]]:
-                cur = pos + 1
-            ranks[idx][j] = cur
+                dense += 1
+            ranks[idx][j] = dense
     return ranks
 
 
@@ -153,9 +161,14 @@ def select_minimax_rank(
     candidates: Sequence[Candidate[ConfigT]],
     objectives: Sequence[ObjectiveSpec],
 ) -> Optional[Candidate[ConfigT]]:
-    """Pick the most balanced candidate (smallest worst-rank across objectives).
+    """Best pick for multi-objective summaries: minimax over per-objective ranks.
 
-    Ties broken by smallest sum of ranks.
+    For each candidate, compute **dense** rank on each objective (1 = best among
+    *candidates*). Take the **maximum** rank across objectives (bottleneck / worst
+    placement). Prefer the candidate(s) with the **smallest** bottleneck (minimax).
+
+    If several tie, pick the one with the **smallest sum of ranks** (more uniform
+    strength, not a spike on one metric).
     """
     if not candidates:
         return None
@@ -169,3 +182,25 @@ def select_minimax_rank(
         return candidates[tied[0]]
     best_idx = min(tied, key=lambda i: sum(ranks[i]))
     return candidates[best_idx]
+
+
+def sort_by_minimax_rank(
+    candidates: Sequence[Candidate[ConfigT]],
+    objectives: Sequence[ObjectiveSpec],
+) -> List[Candidate[ConfigT]]:
+    """Order *candidates* by the same rule as :func:`select_minimax_rank`.
+
+    Primary key: smallest worst per-objective (dense) rank. Secondary: smallest
+    sum of per-objective ranks. The first element matches what
+    ``select_minimax_rank(candidates, objectives)`` returns when not ``None``.
+    """
+    if not candidates:
+        return []
+    if len(candidates) == 1:
+        return [candidates[0]]
+    ranks = _rank_candidates(candidates, objectives)
+    order = sorted(
+        range(len(candidates)),
+        key=lambda i: (max(ranks[i]), sum(ranks[i])),
+    )
+    return [candidates[i] for i in order]

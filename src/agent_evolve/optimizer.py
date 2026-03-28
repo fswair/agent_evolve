@@ -71,6 +71,17 @@ class AgentEvolver:
         """Create a synthetic ``problem_def`` module in ``sys.modules``."""
         mod = types.ModuleType(_PROBLEM_DEF_MODULE)
         mod.problem = problem  # type: ignore[attr-defined]
+        cm = getattr(problem, "candidate_model", None)
+        if cm is None:
+            cm = getattr(type(problem), "candidate_model", None)
+        if cm is None:
+            from pydantic import BaseModel, ConfigDict
+
+            class _FallbackCandidate(BaseModel):
+                model_config = ConfigDict(extra="allow")
+
+            cm = _FallbackCandidate
+        mod.CandidateConfig = cm  # type: ignore[attr-defined]
         mod.config = {  # type: ignore[attr-defined]
             "pop_size": self.pop_size,
             "generations": self.generations,

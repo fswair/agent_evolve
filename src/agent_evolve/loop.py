@@ -6,13 +6,14 @@ knows nothing about kedi or adapters.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence
+from typing import Any, Callable, Dict, List, Protocol, Sequence
 
 from agent_evolve.problem import ObjectiveSpec
 from agent_evolve.results import (
     Candidate,
     SearchResult,
     compute_pareto_front,
+    select_minimax_rank,
 )
 from agent_evolve._support import (
     CandidateResult,
@@ -77,6 +78,54 @@ def _noop_log(msg: str) -> None:
     pass
 
 
+def _snapshot_best(
+    pareto: Sequence[Candidate],
+    objectives: Sequence[ObjectiveSpec],
+) -> Candidate:
+    """Minimax pick on the current Pareto set (same rule as ``SearchResult.best``)."""
+    b = select_minimax_rank(list(pareto), objectives)
+    if b is None:
+        return Candidate(configuration={}, objectives={}, metadata={})
+    return b
+
+
+def _log_batch_metrics(
+    log: LogFn,
+    label: str,
+    ordered: Sequence[CandidateResult],
+    objectives: Sequence[ObjectiveSpec],
+) -> None:
+    """One line per candidate–metric pair; invalid candidates get a single error line."""
+    if not ordered:
+        log(f"{label}: (none)")
+        return
+    log(f"{label}:")
+    for i, r in enumerate(ordered, 1):
+        if r.is_valid:
+            for spec in objectives:
+                v = r.objectives.get(spec.name)
+                log(f"  [{i}] {spec.name}: {v!s}")
+        else:
+            err = (r.error_message or "?").replace("\n", " ")
+            if len(err) > 400:
+                err = err[:400] + "..."
+            log(f"  [{i}] error: {err}")
+
+
+def _log_instruction_update(
+    log: LogFn,
+    title: str,
+    previous: str,
+    new: str,
+) -> None:
+    if new == previous:
+        return
+    log(f"{title}:")
+    body = new.strip() if new.strip() else "(cleared)"
+    for line in (body.splitlines() or [body]):
+        log(f"  {line}")
+
+
 def _retry(fn: Callable, args: tuple, retries: int, log: LogFn) -> Any:
     """Call *fn* with *args*, retrying up to *retries* times on failure."""
     last_err: Exception | None = None
@@ -138,12 +187,14 @@ def run_evolution_loop(
     history: List[Dict[str, Any]] = []
     constraint_instruction = ""
     performance_insights = ""
+    best_per_generation: List[Candidate] = []
 
-    log(f"=== agent_evolve: {generations} generations, pop={pop_size} ===")
+    log(
+        f"agent_evolve: {generations} generations, pop={pop_size}, "
+        f"batch={candidates_per_batch}"
+    )
 
     # -- Generation 1: initial sampling with regeneration ---------------
-    log(f"\n=== Generation 1 / {generations} (initial sampling) ===")
-
     gen1_valid, gen1_failed, constraint_instruction = _run_initial_generation(
         problem=problem,
         objectives=objectives,
@@ -173,12 +224,16 @@ def run_evolution_loop(
     pareto = compute_pareto_front(
         [result_to_candidate(r) for r in all_valid], objectives,
     )
-    log(f"Generation 1: {len(gen1_valid)} valid, Pareto size={len(pareto)}")
+    best_per_generation.append(_snapshot_best(pareto, objectives))
 
     if gen1_valid:
+        prev_pi = performance_insights
         performance_insights = _build_performance_insights(
             gen1_valid, objectives, search_space_desc,
-            generate_performance_insights, log,
+            generate_performance_insights,
+        )
+        _log_instruction_update(
+            log, "Performance instructions", prev_pi, performance_insights,
         )
 
     history.append({
@@ -190,8 +245,6 @@ def run_evolution_loop(
 
     # -- Generations 2..N: evolution from Pareto front -------------------
     for gen in range(2, generations + 1):
-        log(f"\n=== Generation {gen} / {generations} ===")
-
         gen_valid, gen_failed, constraint_instruction = _run_evolution_generation(
             problem=problem,
             objectives=objectives,
@@ -226,6 +279,7 @@ def run_evolution_loop(
         pareto = compute_pareto_front(
             [result_to_candidate(r) for r in all_valid], objectives,
         )
+        best_per_generation.append(_snapshot_best(pareto, objectives))
 
         if all_valid:
             stats = compute_performance_stats(all_valid, objectives)
@@ -233,13 +287,14 @@ def run_evolution_loop(
                 top_pareto = stats.get("top_3_pareto", [])
                 p_str = (prettify_results(top_pareto, objectives)
                          if top_pareto else "None")
+                prev_pi = performance_insights
                 performance_insights = update_performance_insights(
                     performance_insights, p_str,
                     len(all_valid), stats.get("pareto_size", 0),
                 )
-
-        log(f"Generation {gen}: {len(gen_valid)} valid, "
-            f"Pareto size={len(pareto)}")
+                _log_instruction_update(
+                    log, "Performance instructions", prev_pi, performance_insights,
+                )
 
         history.append({
             "gen": gen,
@@ -249,11 +304,21 @@ def run_evolution_loop(
         })
 
     result = build_search_result(
-        all_valid, all_candidates_meta, objectives, history,
+        all_valid,
+        all_candidates_meta,
+        objectives,
+        history,
+        best_per_generation=best_per_generation,
     )
-    log(f"\n=== Final Results ===")
-    log(f"Total valid: {len(all_valid)}, Pareto size: {len(result.pareto_front)}")
-    log(f"Best: {result.best.objectives}")
+    log("")
+    log(
+        f"Summary: valid={len(all_valid)}, pareto={len(result.pareto_front)}, "
+        f"final best objectives={result.best.objectives}"
+    )
+    log("Best per generation (minimax on cumulative Pareto):")
+    for i, b in enumerate(result.best_per_generation, 1):
+        cfg = prettify_configuration(b.configuration)
+        log(f"  gen {i}: {b.objectives} | {cfg}")
     return result
 
 
@@ -285,14 +350,11 @@ def _run_initial_generation(
 
     for regen_round in range(max_regen_rounds):
         if regen_round == 0:
-            log(f"[agent_evolve] Generating {candidates_per_batch} "
-                f"initial candidates")
             raw = generate_initial_candidates(
                 search_space_desc, candidates_per_batch,
             )
+            batch_label = f"Proposed candidates (initial sampling, round {regen_round + 1})"
         else:
-            log(f"[agent_evolve] Regenerating {candidates_per_batch} "
-                f"candidates from failure insights")
             failed_str = prettify_results(last_round_failed, objectives)
             ci = constraint_instruction or "No specific constraints learned yet."
             pi = performance_insights or "No performance insights available yet."
@@ -300,13 +362,20 @@ def _run_initial_generation(
                 failed_str, candidates_per_batch,
                 search_space_desc, ci, pi,
             )
+            batch_label = (
+                f"Proposed candidates (regeneration, round {regen_round + 1})"
+            )
 
-        candidates = parse_candidates(raw, candidates_per_batch, log)
-        valid_batch, failed_batch = evaluate_batch(
-            problem, candidates, objectives, verbose=True, log_fn=log,
+        candidates, raw_elems = parse_candidates(raw, candidates_per_batch, log)
+        valid_batch, failed_batch, ordered_batch = evaluate_batch(
+            problem,
+            candidates,
+            objectives,
+            raw_llm_elements=raw_elems,
+            verbose=False,
+            log_fn=log,
         )
-        log(f"  Batch {regen_round + 1}: "
-            f"{len(valid_batch)} valid, {len(failed_batch)} failed")
+        _log_batch_metrics(log, batch_label, ordered_batch, objectives)
 
         if failed_batch:
             _analyze_failures(
@@ -323,11 +392,14 @@ def _run_initial_generation(
                 last_round_failed, gen_failed, max_failed_examples,
             )
             sampled_str = prettify_results(sampled, objectives)
+            prev_ci = constraint_instruction
             constraint_instruction = generate_constraint_instruction(
                 sampled_str, search_space_desc,
             )
+            _log_instruction_update(
+                log, "Constraint instruction", prev_ci, constraint_instruction,
+            )
 
-        log(f"  Collected {len(gen_valid)}/{pop_size} valid")
         if len(gen_valid) >= pop_size:
             break
 
@@ -360,8 +432,8 @@ def _run_evolution_generation(
     gen_failed: List[CandidateResult] = []
 
     if not prev_pareto:
-        log("  No Pareto front — falling back to initial sampling")
         raw = generate_initial_candidates(search_space_desc, pop_size)
+        first_label = "Proposed candidates (offspring, initial fallback batch)"
     else:
         pareto_as_cr = [
             CandidateResult(
@@ -374,16 +446,21 @@ def _run_evolution_generation(
         ci = constraint_instruction or "Follow standard constraints."
         pi = (performance_insights
               or "Analyze the Pareto configurations for patterns.")
-        log(f"[agent_evolve] Generating {pop_size} offspring from Pareto front")
         raw = generate_offspring(
             pareto_str, pop_size, search_space_desc, ci, pi,
         )
+        first_label = "Proposed candidates (offspring from Pareto)"
 
-    candidates = parse_candidates(raw, pop_size, log)
-    valid_batch, failed_batch = evaluate_batch(
-        problem, candidates, objectives, verbose=True, log_fn=log,
+    candidates, raw_elems = parse_candidates(raw, pop_size, log)
+    valid_batch, failed_batch, ordered_batch = evaluate_batch(
+        problem,
+        candidates,
+        objectives,
+        raw_llm_elements=raw_elems,
+        verbose=False,
+        log_fn=log,
     )
-    log(f"  Offspring: {len(valid_batch)} valid, {len(failed_batch)} failed")
+    _log_batch_metrics(log, first_label, ordered_batch, objectives)
 
     if failed_batch:
         _analyze_failures(
@@ -412,28 +489,34 @@ def _run_evolution_generation(
             ci = (constraint_instruction
                   or "Follow the patterns from Pareto configurations.")
             pi = performance_insights or ""
-            log(f"[agent_evolve] Regenerating {candidates_per_batch} "
-                f"offspring from Pareto + failure insights")
             raw = regenerate_offspring(
                 failed_str, p_str, candidates_per_batch,
                 search_space_desc, ci, pi,
             )
+            regen_label = (
+                f"Proposed candidates (offspring regeneration {regen_round + 1})"
+            )
         else:
             ci = constraint_instruction or "No specific constraints learned yet."
             pi = performance_insights or "No performance insights available yet."
-            log(f"[agent_evolve] Regenerating {candidates_per_batch} "
-                f"candidates from failure insights")
             raw = regenerate_candidates(
                 failed_str, candidates_per_batch,
                 search_space_desc, ci, pi,
             )
+            regen_label = (
+                f"Proposed candidates (regeneration {regen_round + 1})"
+            )
 
-        candidates = parse_candidates(raw, candidates_per_batch, log)
-        valid_batch, failed_batch = evaluate_batch(
-            problem, candidates, objectives, verbose=True, log_fn=log,
+        candidates, raw_elems = parse_candidates(raw, candidates_per_batch, log)
+        valid_batch, failed_batch, ordered_batch = evaluate_batch(
+            problem,
+            candidates,
+            objectives,
+            raw_llm_elements=raw_elems,
+            verbose=False,
+            log_fn=log,
         )
-        log(f"  Regen {regen_round + 1}: "
-            f"{len(valid_batch)} valid, {len(failed_batch)} failed")
+        _log_batch_metrics(log, regen_label, ordered_batch, objectives)
 
         if failed_batch:
             _analyze_failures(
@@ -445,14 +528,17 @@ def _run_evolution_generation(
                 failed_batch, gen_failed, max_failed_examples,
             )
             sampled_str = prettify_results(sampled, objectives)
+            prev_ci = constraint_instruction
             constraint_instruction = update_constraint_instruction(
                 constraint_instruction, sampled_str, search_space_desc,
+            )
+            _log_instruction_update(
+                log, "Constraint instruction", prev_ci, constraint_instruction,
             )
 
         gen_valid.extend(valid_batch)
         last_round_failed = failed_batch
         regen_round += 1
-        log(f"  Collected {len(gen_valid)}/{pop_size} valid")
 
     gen_valid = gen_valid[:pop_size]
     return gen_valid, gen_failed, constraint_instruction
@@ -470,13 +556,22 @@ def _analyze_failures(
     log: LogFn,
 ) -> None:
     failed_str = prettify_results(failed, objectives)
-    log(f"[agent_evolve] Analysing {len(failed)} failed candidates")
     insights = generate_failure_insights(
         failed_str, search_space_desc, len(failed),
     )
     if isinstance(insights, list):
         for r, insight in zip(failed, insights):
             r.insight = str(insight)
+        if len(insights) != len(failed):
+            log(
+                f"[agent_evolve] WARNING: got {len(insights)} insights for "
+                f"{len(failed)} failures — pairing may be wrong"
+            )
+    else:
+        log(
+            f"[agent_evolve] WARNING: generate_failure_insights returned "
+            f"{type(insights).__name__}, expected list — insights not attached"
+        )
 
 
 def _build_performance_insights(
@@ -484,7 +579,6 @@ def _build_performance_insights(
     objectives: Sequence[ObjectiveSpec],
     search_space_desc: str,
     generate_performance_insights: Callable,
-    log: LogFn,
 ) -> str:
     stats = compute_performance_stats(valid_results, objectives)
     if not stats:
@@ -509,5 +603,4 @@ def _build_performance_insights(
         lines.append("\nTop Pareto configurations:")
         lines.append(prettify_results(top_pareto, objectives))
     stats_str = "\n".join(lines)
-    log("[agent_evolve] Generating performance insights")
     return generate_performance_insights(stats_str, search_space_desc)

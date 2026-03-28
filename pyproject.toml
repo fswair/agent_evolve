@@ -12,6 +12,7 @@ license = {text = "MIT"}
 
 dependencies = [
     "kedi @ file:./kedi",
+    "pydantic>=2",
 ]
 
 [project.optional-dependencies]

@@ -3,12 +3,26 @@
 This file satisfies the agent_evolve problem_def contract:
   - ``problem`` — an object implementing the Problem protocol
   - ``config``  — search hyper-parameters dict
+  - ``CandidateConfig`` — Pydantic model for LLM output (via ``problem.candidate_model``)
 """
+
+from pydantic import BaseModel, Field
 
 from agent_evolve import ObjectiveSpec
 
 
+class CandidateConfig(BaseModel):
+    """One candidate configuration; fields must match ``validate`` / ``evaluate``."""
+
+    selection: list[int] = Field(
+        ...,
+        min_length=1,
+        description="Subset of item indices (each index used at most once)",
+    )
+
+
 class KnapsackProblem:
+    candidate_model = CandidateConfig
     """0/1 knapsack with two objectives: maximise value, minimise weight."""
 
     ITEMS = [
